@@ -9,7 +9,13 @@ import {
   Pie,
   Cell,
 } from "recharts";
-import { ChevronDown, ChevronRight, Info } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Info,
+  Server,
+  HardDrive,
+} from "lucide-react";
 
 const COLORS = [
   "#0088FE",
@@ -22,7 +28,13 @@ const COLORS = [
 
 const Dashboard = () => {
   const [data, setData] = useState(null);
-  const [expandedServices, setExpandedServices] = useState({});
+  const [expandedServer, setExpandedServer] = useState(null);
+
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const monthlyHours = daysInMonth * 24;
 
   useEffect(() => {
     fetch("/data/charges.json")
@@ -56,6 +68,33 @@ const Dashboard = () => {
     }
   };
 
+  const calculateHoursFromCreation = (createdDate) => {
+    const now = new Date();
+    const created = new Date(createdDate);
+
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const start = created > monthStart ? created : monthStart;
+
+    if (now < start) return 0;
+
+    const diffMs = now - start;
+    const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+    return diffHours;
+  };
+
+  const calculateDaysFromCreation = (createdDate) => {
+    const now = new Date();
+    const created = new Date(createdDate);
+
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const start = created > monthStart ? created : monthStart;
+    if (now < start) return 0;
+
+    const diffMs = now - start;
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    return diffDays;
+  };
+
   if (!data)
     return (
       <div className="bg-white rounded-lg shadow p-6">
@@ -74,66 +113,137 @@ const Dashboard = () => {
       </div>
     );
 
-  const calculateSubServiceCost = (subService) => {
-    return Object.entries(subService.enabled_region).reduce(
-      (total, [_, count]) => {
-        return (
-          total +
-          subService.amount_per_iteration *
-            subService.iterations_per_month *
-            count
-        );
+  const calculateServerCost = (
+    server,
+    instanceType,
+    volumeAmountPerIteration,
+  ) => {
+    const actualHours = calculateHoursFromCreation(server.created_date);
+    const actualDays = calculateDaysFromCreation(server.created_date);
+
+    const currentStorageCost =
+      parseInt(server.volume) * volumeAmountPerIteration * (actualDays / 30);
+    const currentComputeCost =
+      server.status === "Running"
+        ? instanceType.amount_per_iteration * actualHours
+        : 0;
+
+    const monthlyStorageCost =
+      parseInt(server.volume) * volumeAmountPerIteration;
+    const monthlyComputeCost =
+      server.status === "Running"
+        ? instanceType.amount_per_iteration * monthlyHours
+        : 0;
+
+    return {
+      current: {
+        storage: currentStorageCost,
+        compute: currentComputeCost,
+        total: currentStorageCost + currentComputeCost,
+        hours: actualHours,
+        days: actualDays,
       },
-      0,
-    );
+      monthly: {
+        storage: monthlyStorageCost,
+        compute: monthlyComputeCost,
+        total: monthlyStorageCost + monthlyComputeCost,
+        hours: monthlyHours,
+      },
+    };
   };
 
-  const calculateServiceCost = (service) => {
-    return service.sub_services.reduce((total, subService) => {
-      return total + calculateSubServiceCost(subService);
+  const getAllServers = () => {
+    const servers = [];
+
+    data.AWS_usable_services.forEach((service) => {
+      if (service.service === "Elastic Compute Cloud") {
+        service.sub_services.forEach((instanceType) => {
+          Object.entries(instanceType.enabled_region).forEach(
+            ([region, serverList]) => {
+              serverList.forEach((server) => {
+                const cost = calculateServerCost(
+                  server,
+                  instanceType,
+                  service.volume_amount_per_iteration,
+                );
+                servers.push({
+                  ...server,
+                  instanceType: instanceType.service,
+                  region,
+                  cost,
+                  instancePrice: instanceType.amount_per_iteration,
+                  volumePrice: service.volume_amount_per_iteration,
+                });
+              });
+            },
+          );
+        });
+      }
+    });
+
+    return servers.sort((a, b) => b.cost.monthly.total - a.cost.monthly.total);
+  };
+
+  const calculateVPCCost = () => {
+    const vpcService = data.AWS_usable_services.find(
+      (s) => s.service === "Virtual Private Cloud",
+    );
+    if (!vpcService) return 0;
+
+    return vpcService.sub_services.reduce((total, subService) => {
+      return (
+        total +
+        Object.values(subService.enabled_region).reduce((sum, count) => {
+          return (
+            sum +
+            subService.amount_per_iteration *
+              subService.iterations_per_month *
+              count
+          );
+        }, 0)
+      );
     }, 0);
   };
 
-  const usableServicesTotal = data.AWS_usable_services.reduce(
-    (total, service) => {
-      return total + calculateServiceCost(service);
-    },
+  const allServers = getAllServers();
+  const totalServerCost = allServers.reduce(
+    (sum, server) => sum + server.cost.monthly.total,
     0,
   );
-
+  const totalCurrentServerCost = allServers.reduce(
+    (sum, server) => sum + server.cost.current.total,
+    0,
+  );
+  const vpcCost = calculateVPCCost();
   const defaultServicesTotal = data.AWS_default_services.reduce(
-    (total, service) => {
-      return total + service.total_amount;
-    },
+    (total, service) => total + service.total_amount,
     0,
   );
-
-  const totalCost = usableServicesTotal + defaultServicesTotal;
+  const totalMonthlyCost = totalServerCost + vpcCost + defaultServicesTotal;
+  const totalCurrentCost =
+    totalCurrentServerCost + vpcCost + defaultServicesTotal;
 
   const servicesChartData = [
-    ...data.AWS_usable_services.map((service) => ({
-      name: service.service,
-      cost: calculateServiceCost(service),
-    })),
-    {
-      name: "Default Services",
-      cost: defaultServicesTotal,
-    },
+    { name: "EC2 Servers", cost: totalServerCost },
+    { name: "VPC", cost: vpcCost },
+    { name: "Default Services", cost: defaultServicesTotal },
   ];
 
-  const toggleService = (index) => {
-    setExpandedServices((prev) => ({
-      ...prev,
-      [index]: !prev[index],
-    }));
+  const toggleServer = (serverName) => {
+    setExpandedServer(expandedServer === serverName ? null : serverName);
   };
 
   return (
     <div className="bg-white rounded-lg shadow p-6">
       <div className="flex justify-between items-center mb-4">
-        <h2 className="text-xl font-bold">
-          Total Estimated Monthly Cost: ${totalCost.toFixed(2)}
-        </h2>
+        <div>
+          <h2 className="text-xl font-bold">
+            Monthly Cost: ${totalMonthlyCost.toFixed(2)}
+          </h2>
+          <p className="text-lg text-gray-600">
+            Current Cost to Date: ${totalCurrentCost.toFixed(2)}
+          </p>
+        </div>
         <input
           type="file"
           accept=".json"
@@ -144,8 +254,9 @@ const Dashboard = () => {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
         <div className="bg-white rounded-lg shadow p-4">
-          <BarChart width={500} height={400} data={servicesChartData}>
-            <XAxis dataKey="name" angle={-45} textAnchor="end" height={150} />
+          <h3 className="text-lg font-semibold mb-4">Monthly Cost Breakdown</h3>
+          <BarChart width={400} height={300} data={servicesChartData}>
+            <XAxis dataKey="name" />
             <YAxis />
             <Tooltip formatter={(value) => `$${value.toFixed(2)}`} />
             <Bar dataKey="cost" fill="#8884d8" />
@@ -153,7 +264,8 @@ const Dashboard = () => {
         </div>
 
         <div className="bg-white rounded-lg shadow p-4">
-          <PieChart width={500} height={400}>
+          <h3 className="text-lg font-semibold mb-4">Service Distribution</h3>
+          <PieChart width={400} height={300}>
             <Pie
               data={servicesChartData}
               dataKey="cost"
@@ -177,70 +289,260 @@ const Dashboard = () => {
         </div>
       </div>
 
-      <div className="space-y-4">
-        {data.AWS_usable_services.map((service, serviceIndex) => (
-          <div key={serviceIndex} className="border rounded-lg">
-            <div
-              className="p-4 cursor-pointer hover:bg-gray-50 flex items-center justify-between"
-              onClick={() => toggleService(serviceIndex)}
-            >
-              <div className="flex items-center gap-2">
-                {expandedServices[serviceIndex] ? (
-                  <ChevronDown size={20} />
-                ) : (
-                  <ChevronRight size={20} />
-                )}
-                <span className="font-medium">
-                  {service.service}
-                  <span className="text-xs text-gray-500 font-medium ml-4">
-                    ( {service.desc} )
-                  </span>
-                </span>
-              </div>
-              <span className="font-medium">
-                ${calculateServiceCost(service).toFixed(2)}
-              </span>
-            </div>
-            {expandedServices[serviceIndex] && (
-              <div className="p-4 border-t">
-                <div className="space-y-3">
-                  {service.sub_services.map((subService, subIndex) => (
-                    <div
-                      key={subIndex}
-                      className="flex justify-between items-center p-2 bg-gray-50 rounded"
-                    >
-                      <div>
-                        <div className="font-medium">{subService.service}</div>
-                        <div className="text-sm text-gray-500">
-                          {Object.entries(subService.enabled_region)
-                            .map(
-                              ([region, count]) =>
-                                `${region}: ${count} ${subService.service_type}${count > 1 ? "s" : ""}`,
-                            )
-                            .join(" | ")}
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div>
-                          ${calculateSubServiceCost(subService).toFixed(2)}
-                        </div>
-                        <div className="text-xs text-gray-500">
-                          ${subService.amount_per_iteration} ×{" "}
-                          {subService.iterations_per_month}{" "}
-                          {subService.iteration_name}
-                        </div>
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-6">
+        <div className="bg-blue-50 p-4 rounded-lg">
+          <div className="text-sm text-gray-600">Running Servers</div>
+          <div className="text-2xl font-bold text-blue-600">
+            {allServers.filter((s) => s.status === "Running").length}
+          </div>
+        </div>
+        <div className="bg-red-50 p-4 rounded-lg">
+          <div className="text-sm text-gray-600">Stopped Servers</div>
+          <div className="text-2xl font-bold text-red-600">
+            {allServers.filter((s) => s.status === "Stopped").length}
+          </div>
+        </div>
+        <div className="bg-green-50 p-4 rounded-lg">
+          <div className="text-sm text-gray-600">Monthly Server Costs</div>
+          <div className="text-2xl font-bold text-green-600">
+            ${totalServerCost.toFixed(2)}
+          </div>
+        </div>
+        <div className="bg-purple-50 p-4 rounded-lg">
+          <div className="text-sm text-gray-600">Current Server Costs</div>
+          <div className="text-2xl font-bold text-purple-600">
+            ${totalCurrentServerCost.toFixed(2)}
+          </div>
+        </div>
+        <div className="bg-yellow-50 p-4 rounded-lg">
+          <div className="text-sm text-gray-600">
+            Other Services Monthly Cost
+          </div>
+          <div className="text-2xl font-bold text-yellow-600">
+            ${(vpcCost + defaultServicesTotal).toFixed(2)}
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-3 relative border-2 border-gray-200 rounded-lg shadow-sm p-4">
+        <h3 className="text-lg font-semibold mb-4">
+          EC2 Servers ({allServers.length} total)
+        </h3>
+
+        <div className="max-h-[50vh] overflow-y-auto">
+          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
+            {allServers.map((server, index) => (
+              <div
+                key={`${server.name}-${index}`}
+                className="border rounded-lg overflow-hidden transition-all duration-200"
+              >
+                <div
+                  className={`p-4 cursor-pointer hover:bg-gray-50 flex flex-col gap-2 transition-colors duration-200 ${
+                    server.status === "Running"
+                      ? "border-l-4 border-l-green-500"
+                      : "border-l-4 border-l-red-500"
+                  }`}
+                  onClick={() => toggleServer(`${server.name}-${index}`)}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      {expandedServer === `${server.name}-${index}` ? (
+                        <ChevronDown size={16} className="text-gray-500" />
+                      ) : (
+                        <ChevronRight size={16} className="text-gray-500" />
+                      )}
+                      <Server
+                        size={16}
+                        className={
+                          server.status === "Running"
+                            ? "text-green-500"
+                            : "text-red-500"
+                        }
+                      />
+                      <div className="font-medium text-gray-900 text-sm truncate">
+                        {server.name}
                       </div>
                     </div>
-                  ))}
+                    <span
+                      className={`px-2 py-1 rounded-full text-xs ${
+                        server.status === "Running"
+                          ? "bg-green-100 text-green-800"
+                          : "bg-red-100 text-red-800"
+                      }`}
+                    >
+                      {server.status}
+                      {server.status === "Running" &&
+                        ` for ${server.cost.current.days}d`}
+                    </span>
+                  </div>
+
+                  <div className="flex justify-between text-sm">
+                    <div>
+                      <div className="text-xs text-gray-500">Monthly</div>
+                      <div className="font-semibold">
+                        ${server.cost.monthly.total.toFixed(2)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-gray-500">Current</div>
+                      <div className="font-semibold text-blue-600">
+                        ${server.cost.current.total.toFixed(2)}
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
-            )}
+            ))}
           </div>
-        ))}
+        </div>
+      </div>
+
+      {expandedServer && (
+        <div className="space-y-3 relative bg-white border-2 border-gray-200 rounded-lg shadow-sm p-4 mb-4 mt-4">
+          {(() => {
+            const server = allServers.find(
+              (s, i) => `${s.name}-${i}` === expandedServer,
+            );
+            if (!server) return null;
+
+            return (
+              <div>
+                <div className="flex justify-between items-center mb-3">
+                  <h4 className="font-semibold text-lg">
+                    {server.name} ••• {server.instanceType} ••• {server.region}
+                  </h4>
+                  <button
+                    onClick={() => setExpandedServer(null)}
+                    className="text-gray-500 hover:text-gray-700 text-xl"
+                  >
+                    X
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-3">
+                    <h5 className="font-medium text-gray-900 flex items-center gap-2">
+                      <Server size={16} />
+                      Compute Cost
+                    </h5>
+                    <div className="bg-gray-50 p-3 rounded border">
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm text-gray-600">
+                          Hourly Rate:
+                        </span>
+                        <span className="font-medium">
+                          ${server.instancePrice}/hr
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center mt-1">
+                        <span className="text-sm text-gray-600">
+                          Current Up time Hours:
+                        </span>
+                        <span className="font-medium">
+                          {server.cost.current.hours}h
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center mt-1">
+                        <span className="text-sm text-gray-600">
+                          Monthly Up time Hours:
+                        </span>
+                        <span className="font-medium">
+                          {server.status === "Running"
+                            ? `${monthlyHours}h`
+                            : "0h"}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center mt-2 pt-2 border-t">
+                        <span className="font-medium">Current Total:</span>
+                        <span className="font-bold text-blue-600">
+                          ${server.cost.current.compute.toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="font-medium">Monthly Total:</span>
+                        <span className="font-bold text-blue-600">
+                          ${server.cost.monthly.compute.toFixed(2)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <h5 className="font-medium text-gray-900 flex items-center gap-2">
+                      <HardDrive size={16} />
+                      Storage Cost
+                    </h5>
+                    <div className="bg-gray-50 p-3 rounded border">
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm text-gray-600">
+                          Volume Size:
+                        </span>
+                        <span className="font-medium">{server.volume} GB</span>
+                      </div>
+                      <div className="flex justify-between items-center mt-1">
+                        <span className="text-sm text-gray-600">
+                          Price per GB:
+                        </span>
+                        <span className="font-medium">
+                          ${server.volumePrice}/GB
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center mt-1">
+                        <span className="text-sm text-gray-600">
+                          Days Active:
+                        </span>
+                        <span className="font-medium">
+                          {server.cost.current.days}d
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center mt-2 pt-2 border-t">
+                        <span className="font-medium">Current Total:</span>
+                        <span className="font-bold text-green-600">
+                          ${server.cost.current.storage.toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="font-medium">Monthly Total:</span>
+                        <span className="font-bold text-green-600">
+                          ${server.cost.monthly.storage.toFixed(2)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                {server.status === "Stopped" && (
+                  <div className="bg-yellow-50 border border-yellow-200 rounded p-2 mt-4">
+                    <div className="text-xs text-yellow-800">
+                      <Info size={12} className="inline mr-1" />
+                      Stopped servers only incur storage costs
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      <div className="mt-8 space-y-4">
+        <h3 className="text-lg font-semibold">Other AWS Services</h3>
+
+        {vpcCost > 0 && (
+          <div className="border rounded-lg p-4">
+            <div className="flex justify-between items-center">
+              <div>
+                <div className="font-medium">Virtual Private Cloud</div>
+                <div className="text-sm text-gray-500">
+                  Network infrastructure
+                </div>
+              </div>
+              <span className="font-semibold">${vpcCost.toFixed(2)}</span>
+            </div>
+          </div>
+        )}
 
         <div className="border rounded-lg">
           <div className="p-4">
-            <h3 className="font-bold mb-2">Default Services</h3>
+            <h4 className="font-medium mb-3">Default Services</h4>
             <div className="space-y-2">
               {data.AWS_default_services.map((service, index) => (
                 <div
@@ -248,13 +550,14 @@ const Dashboard = () => {
                   className="flex justify-between items-center p-2 bg-gray-50 rounded"
                 >
                   <div className="flex items-center">
-                    {service.name}
-                    <span className="text-xs text-gray-500 font-medium ml-4">
-                      {" "}
-                      ( {service.desc} )
+                    <span className="font-medium">{service.name}</span>
+                    <span className="text-xs text-gray-500 ml-2">
+                      ({service.desc})
                     </span>
                   </div>
-                  <span>${service.total_amount.toFixed(2)}</span>
+                  <span className="font-semibold">
+                    ${service.total_amount.toFixed(2)}
+                  </span>
                 </div>
               ))}
             </div>
