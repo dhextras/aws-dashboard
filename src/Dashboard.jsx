@@ -205,6 +205,25 @@ const Dashboard = () => {
     }, 0);
   };
 
+  const calculateAMICost = () => {
+    const amiService = data.AWS_usable_services.find(
+      (s) => s.service === "AMI",
+    );
+    if (!amiService) return 0;
+
+    return Object.values(amiService.sub_services).reduce((total, amis) => {
+      return (
+        total +
+        amis.reduce(
+          (sum, ami) =>
+            sum +
+            parseFloat(ami.used_ebs_size) * amiService.amount_per_iteration,
+          0,
+        )
+      );
+    }, 0);
+  };
+
   const allServers = getAllServers();
   const totalServerCost = allServers.reduce(
     (sum, server) => sum + server.cost.monthly.total,
@@ -215,17 +234,20 @@ const Dashboard = () => {
     0,
   );
   const vpcCost = calculateVPCCost();
+  const amiCost = calculateAMICost();
   const defaultServicesTotal = data.AWS_default_services.reduce(
     (total, service) => total + service.total_amount,
     0,
   );
-  const totalMonthlyCost = totalServerCost + vpcCost + defaultServicesTotal;
+  const totalMonthlyCost =
+    totalServerCost + vpcCost + amiCost + defaultServicesTotal;
   const totalCurrentCost =
-    totalCurrentServerCost + vpcCost + defaultServicesTotal;
+    totalCurrentServerCost + vpcCost + amiCost + defaultServicesTotal;
 
   const servicesChartData = [
     { name: "EC2 Servers", cost: totalServerCost },
     { name: "VPC", cost: vpcCost },
+    { name: "AMI", cost: amiCost },
     { name: "Default Services", cost: defaultServicesTotal },
   ];
 
@@ -319,7 +341,7 @@ const Dashboard = () => {
             Other Services Monthly Cost
           </div>
           <div className="text-2xl font-bold text-yellow-600">
-            ${(vpcCost + defaultServicesTotal).toFixed(2)}
+            ${(vpcCost + amiCost + defaultServicesTotal).toFixed(2)}
           </div>
         </div>
       </div>
@@ -539,6 +561,66 @@ const Dashboard = () => {
             </div>
           </div>
         )}
+
+        {(() => {
+          const amiService = data.AWS_usable_services.find(
+            (s) => s.service === "AMI",
+          );
+          if (!amiService) return null;
+
+          const amisByRegion = [];
+          let totalAmiCost = 0;
+
+          Object.entries(amiService.sub_services).forEach(([region, amis]) => {
+            const regionCost = amis.reduce(
+              (sum, ami) =>
+                sum +
+                parseFloat(ami.used_ebs_size) * amiService.amount_per_iteration,
+              0,
+            );
+            totalAmiCost += regionCost;
+            amisByRegion.push({ region, amis, cost: regionCost });
+          });
+
+          return (
+            <div className="border rounded-lg p-4">
+              <div className="flex justify-between items-center mb-3">
+                <div>
+                  <div className="font-medium">AMI (Amazon Machine Images)</div>
+                  <div className="text-sm text-gray-500">{amiService.desc}</div>
+                </div>
+                <span className="font-semibold">
+                  ${totalAmiCost.toFixed(2)}
+                </span>
+              </div>
+              <div className="space-y-3">
+                {amisByRegion.map(({ region, amis, cost }) => (
+                  <div key={region} className="bg-gray-50 rounded p-3">
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="font-medium text-sm">{region}</span>
+                      <span className="text-sm font-semibold">
+                        ${cost.toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="space-y-1">
+                      {amis.map((ami, index) => (
+                        <div
+                          key={index}
+                          className="flex justify-between items-center text-xs"
+                        >
+                          <span className="text-gray-600">{ami.name}</span>
+                          <span className="text-gray-500">
+                            {ami.used_ebs_size} GB
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
 
         <div className="border rounded-lg">
           <div className="p-4">
